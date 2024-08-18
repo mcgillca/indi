@@ -1,6 +1,14 @@
 IF(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     INSTALL(FILES 99-indi_auxiliary.rules DESTINATION ${UDEVRULES_INSTALL_DIR})
 ENDIF()
+# ########## AStarBox ############################
+SET(astarbox_SRC
+    astarbox.cpp CAStarBox.cpp mcp3421.cpp PCA9685.cpp)
+
+add_executable(indi_astarbox ${astarbox_SRC})
+target_link_libraries(indi_astarbox indidriver)
+install(TARGETS indi_astarbox RUNTIME DESTINATION bin)
+
 # ########## Terrans PowerBoxGo V2 ###############
 SET(terranspowerboxgov2_SRC
     Terrans_PowerBoxGo_V2.cpp)

@@ -1,0 +1,344 @@
+/*******************************************************************************
+  Copyright(c) 2024 Colin McGill and Rodolphe Pineau. All rights reserved.
+
+  AStarBox power control driver.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms of the GNU General Public License as published by the Free
+  Software Foundation; either version 2 of the License, or (at your option)
+  any later version.
+
+  This program is distributed in the hope that it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+  more details.
+
+  You should have received a copy of the GNU Library General Public License
+  along with this library; see the file COPYING.LIB.  If not, write to
+  the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+  Boston, MA 02110-1301, USA.
+
+  The full GNU General Public License is included in this distribution in the
+  file called LICENSE.
+*******************************************************************************/
+
+#include "astarbox.h"
+#include "indicom.h"
+#include "connectionplugins/connectionserial.h"
+
+#include <memory>
+#include <regex>
+#include <termios.h>
+#include <cstring>
+#include <sys/ioctl.h>
+
+// We declare an auto pointer to AStarBox.
+static std::unique_ptr<AStarBox> pocket_power_box(new AStarBox());
+
+AStarBox::AStarBox()
+{
+    setVersion(0, 0);
+}
+
+const char * AStarBox::getDefaultName()
+{
+    return "AStarBox";
+}
+
+
+bool AStarBox::initProperties()
+{
+    INDI::DefaultDevice::initProperties();
+
+    setDriverInterface(AUX_INTERFACE);
+
+    addAuxControls();
+
+    ////////////////////////////////////////////////////////////////////////////
+    /// Main Control Panel
+    ////////////////////////////////////////////////////////////////////////////
+
+    ////////////////////////////////////////////////////////////////////////////
+    /// Power Group
+    ////////////////////////////////////////////////////////////////////////////
+
+    // Power on Boot
+    PowerOnBootSP[POWER_PORT_1].fill("POWER_PORT_1", "Port 1", ISS_ON);
+    PowerOnBootSP[POWER_PORT_2].fill("POWER_PORT_2", "Port 2", ISS_ON);
+    PowerOnBootSP[POWER_PORT_3].fill("POWER_PORT_3", "Port 3", ISS_ON);
+    PowerOnBootSP[POWER_PORT_4].fill("POWER_PORT_4", "Port 4", ISS_ON);
+    PowerOnBootSP.fill(getDeviceName(),"POWER_CONTROL", "Power Control", MAIN_CONTROL_TAB,
+                       IP_RW, ISR_NOFMANY, 60, IPS_IDLE);
+
+    ////////////////////////////////////////////////////////////////////////////
+    /// Dew Group
+    ////////////////////////////////////////////////////////////////////////////
+
+    // Dew PWM
+    DewPWMNP[DEW_PWM_1].fill("DEW_1", "Dew 1 (%)", "%.2f", 0, 100, 5, 0);
+    DewPWMNP[DEW_PWM_2].fill("DEW_2", "Dew 2 (%)", "%.2f", 0, 100, 5, 0);
+    DewPWMNP.fill(getDeviceName(), "DEW_PWM", "Dew PWM", MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);
+
+        // Power Sensors
+    PowerSensorsNP[SENSOR_VOLTAGE].fill("SENSOR_VOLTAGE", "Voltage (V)", "%4.2f", 0, 999, 100, 0);
+    PowerSensorsNP.fill(getDeviceName(), "POWER_SENSORS", "Sensors", MAIN_CONTROL_TAB, IP_RO,
+                       60, IPS_IDLE);
+
+
+
+    ////////////////////////////////////////////////////////////////////////////
+    /// Serial Connection
+    ////////////////////////////////////////////////////////////////////////////
+    /*    serialConnection = new Connection::Serial(this);
+    serialConnection->registerHandshake([&]()
+    {
+        return Handshake();
+    });
+    registerConnection(serialConnection);
+    */
+    /* Start Timers for data collection */
+    TimerHit();
+    
+    return true;
+}
+
+bool AStarBox::Connect()
+{
+  LOG_INFO("AStarBox connected successfully!");
+    return true;
+}
+ 
+bool AStarBox::Disconnect()
+{
+    LOG_INFO("AStarBox disconnected successfully!");
+    return true;
+}
+
+
+bool AStarBox::updateProperties()
+{
+    INDI::DefaultDevice::updateProperties();
+
+    if (isConnected())
+    {
+        // Main Control
+      defineProperty(PowerOnBootSP);
+      defineProperty(DewPWMNP);
+      
+      defineProperty(PowerSensorsNP);
+      
+        setupComplete = true;
+    }
+    else
+    {
+        // Main Control
+         deleteProperty(PowerSensorsNP);
+        deleteProperty(PowerOnBootSP);
+
+
+        // Dew
+        deleteProperty(DewPWMNP);
+
+        setupComplete = false;
+    }
+
+    return true;
+}
+
+
+bool AStarBox::ISNewSwitch(const char * dev, const char * name, ISState * states, char * names[], int n)
+{
+    if (dev && !strcmp(dev, getDeviceName()))
+    {
+        // Power on boot
+        if (PowerOnBootSP.isNameMatch(name))
+        {
+            PowerOnBootSP.update(states, names, n);
+            PowerOnBootSP.setState(setPowerOnBoot() ? IPS_OK : IPS_ALERT);
+            PowerOnBootSP.apply();
+            saveConfig(true, PowerOnBootSP.getName());
+            return true;
+        }
+
+    }
+
+    return DefaultDevice::ISNewSwitch(dev, name, states, names, n);
+}
+
+bool AStarBox::ISNewNumber(const char * dev, const char * name, double values[], char * names[], int n)
+{
+    if (dev && !strcmp(dev, getDeviceName()))
+    {
+        // Dew PWM
+        if (DewPWMNP.isNameMatch(name))
+        {
+            bool rc1 = false, rc2 = false;
+            for (int i = 0; i < n; i++)
+            {
+                if (!strcmp(names[i], DewPWMNP[DEW_PWM_1].getName()))
+                    rc1 = setDewPWM(3, static_cast<uint8_t>(values[i] / 100.0 * 255.0));
+                else if (!strcmp(names[i], DewPWMNP[DEW_PWM_2].getName()))
+                    rc2 = setDewPWM(4, static_cast<uint8_t>(values[i] / 100.0 * 255.0));
+            }
+
+            DewPWMNP.setState((rc1 && rc2) ? IPS_OK : IPS_ALERT);
+            if (DewPWMNP.getState() == IPS_OK)
+                DewPWMNP.update(values, names, n);
+            DewPWMNP.apply();
+            return true;
+        }
+
+    }
+    
+    return INDI::DefaultDevice::ISNewNumber(dev, name, values, names, n);
+}
+
+
+bool AStarBox::setPowerOnBoot()
+{
+    char cmd[PEGASUS_LEN] = {0}, res[PEGASUS_LEN] = {0};
+    snprintf(cmd, PEGASUS_LEN, "PE:%d%d%d%d", PowerOnBootSP[POWER_PORT_1].getState() == ISS_ON ? 1 : 0,
+             PowerOnBootSP[POWER_PORT_2].s == ISS_ON ? 1 : 0,
+             PowerOnBootSP[POWER_PORT_3].s == ISS_ON ? 1 : 0,
+             PowerOnBootSP[POWER_PORT_4].s == ISS_ON ? 1 : 0);
+    LOG_INFO(cmd);
+    return true;
+    /*
+    if (sendCommand(cmd, res))
+    {
+        return (!strcmp(res, "PE:1"));
+    }
+
+    return false;
+    */
+}
+
+bool AStarBox::setDewPWM(uint8_t id, uint8_t value)
+{
+    char cmd[PEGASUS_LEN] = {0}, res[PEGASUS_LEN] = {0}, expected[PEGASUS_LEN] = {0};
+    snprintf(cmd, PEGASUS_LEN, "P%d:%03d", id, value);
+    LOG_INFO(cmd);
+    return true;
+}
+
+bool AStarBox::saveConfigItems(FILE * fp)
+{
+    INDI::DefaultDevice::saveConfigItems(fp);
+    AutoDewSP.save(fp);
+
+    return true;
+}
+
+void AStarBox::TimerHit()
+{
+  LOG_INFO("TimerHit called");
+    if (!isConnected() || setupComplete == false)
+    {
+        SetTimer(getCurrentPollingPeriod());
+        return;
+    }
+
+    getSensorData();
+    SetTimer(getCurrentPollingPeriod());
+}
+
+
+bool AStarBox::getSensorData()
+{
+    char res[PEGASUS_LEN] = {0};
+    LOG_INFO("Should be getting sensor data...");
+    PowerSensorsNP.setState(IPS_OK);
+    PowerSensorsNP.apply();
+    DewPWMNP.setState(IPS_OK);
+    DewPWMNP.apply();
+    PowerOnBootSP.setState(IPS_OK);
+    PowerOnBootSP.apply();
+    return true;
+    /* 
+    if (sendCommand("PA", res))
+    {
+        std::vector<std::string> result = split(res, ":");
+        if (result.size() < PA_N)
+        {
+            LOG_WARN("Received wrong number of detailed sensor data. Retrying...");
+            return false;
+        }
+
+        if (result == lastSensorData)
+            return true;
+
+        // Power Sensors
+        PowerSensorsNP[SENSOR_VOLTAGE].setValue(std::stod(result[PA_VOLTAGE]));
+        PowerSensorsNP[SENSOR_CURRENT].setValue(std::stod(result[PA_CURRENT]) / 65.0);
+        PowerSensorsNP.setState(IPS_OK);
+        if (lastSensorData[PA_VOLTAGE] != result[PA_VOLTAGE] || lastSensorData[PA_CURRENT] != result[PA_CURRENT])
+            PowerSensorsNP.apply();
+
+        // Environment Sensors
+        setParameterValue("WEATHER_TEMPERATURE", std::stod(result[PA_TEMPERATURE]));
+        setParameterValue("WEATHER_HUMIDITY", std::stod(result[PA_HUMIDITY]));
+        setParameterValue("WEATHER_DEWPOINT", std::stod(result[PA_DEW_POINT]));
+        if (lastSensorData[PA_TEMPERATURE] != result[PA_TEMPERATURE] ||
+                lastSensorData[PA_HUMIDITY] != result[PA_HUMIDITY] ||
+                lastSensorData[PA_DEW_POINT] != result[PA_DEW_POINT])
+        {
+            if (WI::syncCriticalParameters())
+                critialParametersLP.apply();
+            ParametersNP.setState(IPS_OK);
+            ParametersNP.apply();
+        }
+
+        // Power Status
+        PowerCycleAllSP[POWER_CYCLE_ON].setState((std::stoi(result[PA_PORT_STATUS]) == 1) ? ISS_ON : ISS_OFF);    addAuxControls();
+
+        PowerCycleAllSP[POWER_CYCLE_OFF].setState((std::stoi(result[PA_PORT_STATUS]) == 0) ? ISS_ON : ISS_OFF);
+        PowerCycleAllSP.setState((std::stoi(result[6]) == 1) ? IPS_OK : IPS_IDLE);
+        if (lastSensorData[PA_PORT_STATUS] != result[PA_PORT_STATUS])
+            PowerCycleAllSP.apply();
+
+        // DSLR Power Status
+        DSLRPowerSP[INDI_ENABLED].setState((std::stoi(result[PA_DSLR_STATUS]) == 1) ? ISS_ON : ISS_OFF);
+        DSLRPowerSP[INDI_DISABLED].setState((std::stoi(result[PA_DSLR_STATUS]) == 0) ? ISS_ON : ISS_OFF);
+        DSLRPowerSP.setState((std::stoi(result[PA_DSLR_STATUS]) == 1) ? IPS_OK : IPS_IDLE);
+        if (lastSensorData[PA_DSLR_STATUS] != result[PA_DSLR_STATUS])
+            DSLRPowerSP.apply();
+
+        // Dew PWM
+        DewPWMNP[DEW_PWM_A].setValue(std::stod(result[PA_DEW_1]) / 255.0 * 100.0);
+        DewPWMNP[DEW_PWM_B].setValue(std::stod(result[PA_DEW_2]) / 255.0 * 100.0);
+        if (lastSensorData[PA_DEW_1] != result[PA_DEW_1] || lastSensorData[PA_DEW_2] != result[PA_DEW_2])
+            DewPWMNP.apply();
+
+        // Auto Dew
+        AutoDewSP[INDI_ENABLED].setState((std::stoi(result[PA_AUTO_DEW]) == 1) ? ISS_ON : ISS_OFF);
+        AutoDewSP[INDI_DISABLED].s = (std::stoi(result[PA_AUTO_DEW]) == 1) ? ISS_OFF : ISS_ON;
+        if (lastSensorData[PA_AUTO_DEW] != result[PA_AUTO_DEW])
+            AutoDewSP.apply();
+
+        lastSensorData = result;
+
+        return true;
+    }
+
+    return false;
+    */
+}
+
+/*
+// Device Control
+bool AStarBox::reboot()
+{
+    return sendCommand("PF", nullptr);
+}
+
+std::vector<std::string> AStarBox::split(const std::string &input, const std::string &regex)
+{
+    // passing -1 as the submatch index parameter performs splitting
+    std::regex re(regex);
+    std::sregex_token_iterator
+    first{input.begin(), input.end(), re, -1},
+          last;
+    return {first, last};
+}
+
+*/

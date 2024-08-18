@@ -645,6 +645,10 @@
         </device>
     </devGroup>
     <devGroup group="Auxiliary">
+        <device label="AStarBox" manufacturer="AStarBox Ltd.">
+            <driver name="AStarBox">indi_astarbox</driver>
+            <version>0.1</version>
+        </device>
         <device label="Astrometry" manufacturer="Others">
             <driver name="Astrometry">indi_astrometry</driver>
             <version>0.1</version>
