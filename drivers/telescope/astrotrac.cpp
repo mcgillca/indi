@@ -40,7 +40,7 @@ const std::array<uint32_t, AstroTrac::SLEW_MODES> AstroTrac::SLEW_SPEEDS = {{1, 
 
 using namespace INDI::AlignmentSubsystem;
 
-AstroTrac::AstroTrac()
+AstroTrac::AstroTrac(): GI(this)
 {
     setVersion(1, 0);
 
@@ -72,10 +72,10 @@ bool AstroTrac::initProperties()
     // Slew Speeds
     for (uint8_t i = 0; i < SLEW_MODES; i++)
     {
-        sprintf(SlewRateSP.sp[i].label, "%dx", SLEW_SPEEDS[i]);
-        SlewRateSP.sp[i].aux = (void *)&SLEW_SPEEDS[i];
+        SlewRateSP[i].setLabel(std::to_string(SLEW_SPEEDS[i]) + "x");
+        SlewRateSP[i].setAux((void *)&SLEW_SPEEDS[i]);
     }
-    SlewRateS[5].s = ISS_ON;
+    SlewRateSP[5].setState(ISS_ON);
 
     // Mount Type
     int configMountType = MOUNT_GEM;
@@ -107,7 +107,7 @@ bool AstroTrac::initProperties()
 
     SetParkDataType(PARK_RA_DEC_ENCODER);
 
-    initGuiderProperties(getDeviceName(), MOTION_TAB);
+    GI::initProperties(MOTION_TAB);
 
     tcpConnection->setDefaultHost("192.168.1.1");
     tcpConnection->setDefaultPort(23);
@@ -155,8 +155,6 @@ bool AstroTrac::updateProperties()
         defineProperty(FirmwareTP);
         defineProperty(AccelerationNP);
         defineProperty(EncoderNP);
-        defineProperty(&GuideNSNP);
-        defineProperty(&GuideWENP);
         defineProperty(GuideRateNP);
 
         // Initial AZ/AL parking position.
@@ -180,10 +178,11 @@ bool AstroTrac::updateProperties()
         deleteProperty(FirmwareTP);
         deleteProperty(AccelerationNP);
         deleteProperty(EncoderNP);
-        deleteProperty(GuideNSNP.name);
-        deleteProperty(GuideWENP.name);
         deleteProperty(GuideRateNP);
     }
+
+    GI::updateProperties();
+
 
     return true;
 }
@@ -290,7 +289,7 @@ bool AstroTrac::getVelocity(INDI_EQ_AXIS axis)
     double velocity(0);
     if (getVelocity(axis, velocity))
     {
-        TrackRateN[axis].value = velocity;
+        TrackRateNP[axis].setValue(velocity);
         return true;
     }
     return false;
@@ -424,7 +423,7 @@ bool AstroTrac::getEncoderPosition(INDI_EQ_AXIS axis)
 /// Mechanical HA Range: -90 to +90 degrees. Home Position Mechanical HA: 0
 /// For north hemisphere, home position HA = -6 hours, DE = 90 degrees.
 /////////////////////////////////////////////////////////////////////////////
-void AstroTrac::getRADEFromEncoders(double haEncoder, double deEncoder, double &ra, double &de)
+void AstroTrac::getRADEFromEncoders(double haEncoder, double deEncoder, double &ra, double &de, TelescopePierSide &pierSide)
 {
     static const double jitter = 0.0005;
     double ha = 0;
@@ -436,19 +435,21 @@ void AstroTrac::getRADEFromEncoders(double haEncoder, double deEncoder, double &
         deEncoder = 0;
 
     // Northern Hemisphere
-    if (LocationN[LOCATION_LATITUDE].value >= 0)
+    if (LocationNP[LOCATION_LATITUDE].getValue() >= 0)
     {
         // "Normal" Pointing State (East, looking West)
         if (MountTypeSP.findOnSwitchIndex() == MOUNT_SINGLE_ARM || deEncoder >= 0)
         {
             de = std::min(90 - deEncoder, 90.0);
             ha = -6.0 + (haEncoder / 360.0) * 24.0;
+            pierSide = PIER_EAST;
         }
         // "Reversed" Pointing State (West, looking East)
         else
         {
             de = 90 + deEncoder;
             ha = 6.0 + (haEncoder / 360.0) * 24.0;
+            pierSide = PIER_WEST;
         }
     }
     else
@@ -458,16 +459,18 @@ void AstroTrac::getRADEFromEncoders(double haEncoder, double deEncoder, double &
         {
             de = std::max(-90 - deEncoder, -90.0);
             ha = -6.0 - (haEncoder / 360.0) * 24.0;
+            pierSide = PIER_EAST;
         }
         // West
         else
         {
             de = -90 + deEncoder;
             ha = 6.0 - (haEncoder / 360.0) * 24.0;
+            pierSide = PIER_WEST;
         }
     }
 
-    double lst = get_local_sidereal_time(LocationN[LOCATION_LONGITUDE].value);
+    double lst = get_local_sidereal_time(LocationNP[LOCATION_LONGITUDE].getValue());
     ra = range24(lst - ha);
 
     char RAStr[32] = {0}, DecStr[32] = {0};
@@ -485,10 +488,10 @@ void AstroTrac::getRADEFromEncoders(double haEncoder, double deEncoder, double &
 /////////////////////////////////////////////////////////////////////////////
 void AstroTrac::getEncodersFromRADE(double ra, double de, double &haEncoder, double &deEncoder)
 {
-    double lst = get_local_sidereal_time(LocationN[LOCATION_LONGITUDE].value);
+    double lst = get_local_sidereal_time(LocationNP[LOCATION_LONGITUDE].getValue());
     double dHA = rangeHA(lst - ra);
     // Northern Hemisphere
-    if (LocationN[LOCATION_LATITUDE].value >= 0)
+    if (LocationNP[LOCATION_LATITUDE].getValue() >= 0)
     {
         // "Normal" Pointing State (East, looking West)
         if (MountTypeSP.findOnSwitchIndex() == MOUNT_SINGLE_ARM || dHA <= 0)
@@ -635,6 +638,7 @@ bool AstroTrac::ReadScopeStatus()
 {
     TelescopeDirectionVector TDV;
     double ra = 0, de = 0, skyRA = 0, skyDE = 0;
+    TelescopePierSide side;
 
     if (isSimulation())
         simulateMount();
@@ -643,7 +647,7 @@ bool AstroTrac::ReadScopeStatus()
     double lastDEEncoder = EncoderNP[AXIS_DE].getValue();
     if (getEncoderPosition(AXIS_RA) && getEncoderPosition(AXIS_DE))
     {
-        getRADEFromEncoders(EncoderNP[AXIS_RA].getValue(), EncoderNP[AXIS_DE].getValue(), ra, de);
+        getRADEFromEncoders(EncoderNP[AXIS_RA].getValue(), EncoderNP[AXIS_DE].getValue(), ra, de, side);
         // Send to client if changed.
         if (std::fabs(lastHAEncoder - EncoderNP[AXIS_RA].getValue()) > 0
                 || std::fabs(lastDEEncoder - EncoderNP[AXIS_DE].getValue()) > 0)
@@ -679,9 +683,9 @@ bool AstroTrac::ReadScopeStatus()
 
     if (TransformTelescopeToCelestial(TDV, skyRA, skyDE))
     {
-        double lst = get_local_sidereal_time(LocationN[LOCATION_LONGITUDE].value);
-        double dHA = rangeHA(lst - skyRA);
-        setPierSide(dHA < 0 ? PIER_EAST : PIER_WEST);
+        // double lst = get_local_sidereal_time(LocationNP[LOCATION_LONGITUDE].getValue());
+        // double dHA = rangeHA(lst - skyRA);
+        setPierSide(side);
 
         char mountRAString[32] = {0}, mountDEString[32] = {0}, skyRAString[32] = {0}, skyDEString[32] = {0};
         fs_sexa(mountRAString, ra, 2, 3600);
@@ -759,6 +763,10 @@ bool AstroTrac::ISNewText(const char *dev, const char *name, char *texts[], char
 /////////////////////////////////////////////////////////////////////////////
 bool AstroTrac::ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n)
 {
+    // Check guider interface
+    if (GI::processNumber(dev, name, values, names, n))
+        return true;
+
     if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
     {
         // Guide Rate
@@ -799,8 +807,6 @@ bool AstroTrac::ISNewNumber(const char *dev, const char *name, double values[], 
             EncoderNP.apply();
             return true;
         }
-
-        processGuiderProperties(name, values, names, n);
 
         // Process alignment properties
         ProcessAlignmentNumberProperties(this, name, values, names, n);
@@ -871,7 +877,7 @@ bool AstroTrac::MoveNS(INDI_DIR_NS dir, TelescopeMotionCommand command)
 
     if (command == MOTION_START)
     {
-        double velocity = SLEW_SPEEDS[IUFindOnSwitchIndex(&SlewRateSP)] * TRACKRATE_SIDEREAL
+        double velocity = SLEW_SPEEDS[SlewRateSP.findOnSwitchIndex()] * TRACKRATE_SIDEREAL
                           * (dir == DIRECTION_NORTH ? 1 : -1);
         setVelocity(AXIS_DE,  velocity);
     }
@@ -898,7 +904,7 @@ bool AstroTrac::MoveWE(INDI_DIR_WE dir, TelescopeMotionCommand command)
 
     if (command == MOTION_START)
     {
-        double velocity = SLEW_SPEEDS[IUFindOnSwitchIndex(&SlewRateSP)] * TRACKRATE_SIDEREAL
+        double velocity = SLEW_SPEEDS[SlewRateSP.findOnSwitchIndex()] * TRACKRATE_SIDEREAL
                           * (dir == DIRECTION_WEST ? 1 : -1);
         setVelocity(AXIS_RA,  velocity);
     }
@@ -963,9 +969,10 @@ IPState AstroTrac::GuideNorth(uint32_t ms)
     // do nothing if idle
     if (TrackState != SCOPE_TRACKING)
     {
-        GuideNSN[AXIS_RA].value = GuideNSN[AXIS_DE].value = 0;
-        GuideNSNP.s = IPS_OK;
-        IDSetNumber(&GuideNSNP, nullptr);
+        GuideNSNP[AXIS_RA].setValue(0);
+        GuideNSNP[AXIS_DE].setValue(0);
+        GuideNSNP.setState(IPS_OK);
+        GuideNSNP.apply();
 
         LOG_INFO("Please start tracking to set guide pulse");
 
@@ -990,9 +997,10 @@ IPState AstroTrac::GuideNorth(uint32_t ms)
     {
         // reset tracking
         SetTrackEnabled(TrackState == SCOPE_TRACKING);
-        GuideNSN[AXIS_RA].value = GuideNSN[AXIS_DE].value = 0;
-        GuideNSNP.s = IPS_OK;
-        IDSetNumber(&GuideNSNP, nullptr);
+        GuideNSNP[AXIS_RA].setValue(0);
+        GuideNSNP[AXIS_DE].setValue(0);
+        GuideNSNP.setState(IPS_OK);
+        GuideNSNP.apply();
     });
     return IPS_BUSY;
 }
@@ -1005,9 +1013,10 @@ IPState AstroTrac::GuideSouth(uint32_t ms)
     // do nothing if idle
     if (TrackState != SCOPE_TRACKING)
     {
-        GuideNSN[AXIS_RA].value = GuideNSN[AXIS_DE].value = 0;
-        GuideNSNP.s = IPS_OK;
-        IDSetNumber(&GuideNSNP, nullptr);
+        GuideNSNP[AXIS_RA].setValue(0);
+        GuideNSNP[AXIS_DE].setValue(0);
+        GuideNSNP.setState(IPS_OK);
+        GuideNSNP.apply();
 
         LOG_INFO("Please start tracking to set guide pulse");
 
@@ -1032,9 +1041,10 @@ IPState AstroTrac::GuideSouth(uint32_t ms)
     {
         // reset tracking
         SetTrackEnabled(TrackState == SCOPE_TRACKING);
-        GuideNSN[AXIS_RA].value = GuideNSN[AXIS_DE].value = 0;
-        GuideNSNP.s = IPS_OK;
-        IDSetNumber(&GuideNSNP, nullptr);
+        GuideNSNP[AXIS_RA].setValue(0);
+        GuideNSNP[AXIS_DE].setValue(0);
+        GuideNSNP.setState(IPS_OK);
+        GuideNSNP.apply();
     });
     return IPS_BUSY;
 }
@@ -1047,9 +1057,10 @@ IPState AstroTrac::GuideEast(uint32_t ms)
     // do nothing if idle
     if (TrackState != SCOPE_TRACKING)
     {
-        GuideWEN[AXIS_RA].value = GuideWEN[AXIS_DE].value = 0;
-        GuideWENP.s = IPS_OK;
-        IDSetNumber(&GuideWENP, nullptr);
+        GuideWENP[AXIS_RA].setValue(0);
+        GuideWENP[AXIS_DE].setValue(0);
+        GuideWENP.setState(IPS_OK);
+        GuideWENP.apply();
 
         LOG_INFO("Please start tracking to set guide pulse");
 
@@ -1082,9 +1093,10 @@ IPState AstroTrac::GuideEast(uint32_t ms)
     {
         // reset the tracking mode
         SetTrackEnabled(TrackState == SCOPE_TRACKING);
-        GuideWEN[AXIS_RA].value = GuideWEN[AXIS_DE].value = 0;
-        GuideWENP.s = IPS_OK;
-        IDSetNumber(&GuideWENP, nullptr);
+        GuideWENP[AXIS_RA].setValue(0);
+        GuideWENP[AXIS_DE].setValue(0);
+        GuideWENP.setState(IPS_OK);
+        GuideWENP.apply();
     });
 
     return IPS_BUSY;
@@ -1098,9 +1110,10 @@ IPState AstroTrac::GuideWest(uint32_t ms)
     // do nothing if idle
     if (TrackState != SCOPE_TRACKING)
     {
-        GuideWEN[AXIS_RA].value = GuideWEN[AXIS_DE].value = 0;
-        GuideWENP.s = IPS_OK;
-        IDSetNumber(&GuideWENP, nullptr);
+        GuideWENP[AXIS_RA].setValue(0);
+        GuideWENP[AXIS_DE].setValue(0);
+        GuideWENP.setState(IPS_OK);
+        GuideWENP.apply();
 
         LOG_INFO("Please start tracking to set guide pulse");
 
@@ -1133,9 +1146,10 @@ IPState AstroTrac::GuideWest(uint32_t ms)
     {
         // reset the tracking mode
         SetTrackEnabled(TrackState == SCOPE_TRACKING);
-        GuideWEN[AXIS_RA].value = GuideWEN[AXIS_DE].value = 0;
-        GuideWENP.s = IPS_OK;
-        IDSetNumber(&GuideWENP, nullptr);
+        GuideWENP[AXIS_RA].setValue(0);
+        GuideWENP[AXIS_DE].setValue(0);
+        GuideWENP.setState(IPS_OK);
+        GuideWENP.apply();
     });
     return IPS_BUSY;
 }
@@ -1162,8 +1176,8 @@ bool AstroTrac::SetTrackMode(uint8_t mode)
         dRA = TRACKRATE_LUNAR;
     else if (mode == TRACK_CUSTOM)
     {
-        dRA = TrackRateN[AXIS_RA].value;
-        dDE = TrackRateN[AXIS_DE].value;
+        dRA = TrackRateNP[AXIS_RA].getValue();
+        dDE = TrackRateNP[AXIS_DE].getValue();
     }
 
     return setVelocity(AXIS_RA, dRA) && setVelocity(AXIS_DE, dDE);
@@ -1176,7 +1190,7 @@ bool AstroTrac::SetTrackEnabled(bool enabled)
 {
     // On engaging track, we simply set the current track mode and it will take care of the rest including custom track rates.
     if (enabled)
-        return SetTrackMode(IUFindOnSwitchIndex(&TrackModeSP));
+        return SetTrackMode(TrackModeSP.findOnSwitchIndex());
     // Disable tracking
     else
     {
@@ -1212,15 +1226,15 @@ void AstroTrac::simulateMount()
         return;
     }
 
-    if (MovementWESP.s == IPS_BUSY || MovementNSSP.s == IPS_BUSY)
+    if (MovementWESP.getState() == IPS_BUSY || MovementNSSP.getState() == IPS_BUSY)
     {
-        double haVelocity = SLEW_SPEEDS[IUFindOnSwitchIndex(&SlewRateSP)] * TRACKRATE_SIDEREAL * (IUFindOnSwitchIndex(
-                                &MovementWESP) == DIRECTION_NORTH ? 1 : -1) * (m_Location.latitude >= 0 ? 1 : -1);
-        double deVelocity = SLEW_SPEEDS[IUFindOnSwitchIndex(&SlewRateSP)] * TRACKRATE_SIDEREAL * (IUFindOnSwitchIndex(
-                                &MovementNSSP) == DIRECTION_NORTH ? 1 : -1) * (m_Location.latitude >= 0 ? 1 : -1);
+        double haVelocity = SLEW_SPEEDS[SlewRateSP.findOnSwitchIndex()] * TRACKRATE_SIDEREAL *
+                            (MovementWESP.findOnSwitchIndex() == DIRECTION_NORTH ? 1 : -1) * (m_Location.latitude >= 0 ? 1 : -1);
+        double deVelocity = SLEW_SPEEDS[SlewRateSP.findOnSwitchIndex()] * TRACKRATE_SIDEREAL *
+                            (MovementNSSP.findOnSwitchIndex() == DIRECTION_NORTH ? 1 : -1) * (m_Location.latitude >= 0 ? 1 : -1);
 
-        haVelocity *= MovementWESP.s == IPS_BUSY ? 1 : 0;
-        deVelocity *= MovementNSSP.s == IPS_BUSY ? 1 : 0;
+        haVelocity *= MovementWESP.getState() == IPS_BUSY ? 1 : 0;
+        deVelocity *= MovementNSSP.getState() == IPS_BUSY ? 1 : 0;
 
         // In degrees
         double elapsedDistanceHA = (elapsed / 1000.0 * haVelocity) / 3600.0;
@@ -1276,7 +1290,7 @@ void AstroTrac::simulateMount()
             case SCOPE_TRACKING:
             {
                 // Increase HA axis at selected tracking rate (arcsec/s).
-                SimData.currentMechanicalHA += (elapsed / 1000.0 * TrackRateN[AXIS_RA].value) / 3600.0;
+                SimData.currentMechanicalHA += (elapsed / 1000.0 * TrackRateNP[AXIS_RA].getValue()) / 3600.0;
                 if (SimData.currentMechanicalHA > 180)
                     SimData.currentMechanicalHA = 180;
                 else if (SimData.currentMechanicalHA < -180)

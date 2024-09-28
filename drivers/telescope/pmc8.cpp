@@ -55,10 +55,10 @@
 static std::unique_ptr<PMC8> scope(new PMC8());
 
 /* Constructor */
-PMC8::PMC8()
+PMC8::PMC8() : GI(this)
 {
     currentRA  = ln_get_apparent_sidereal_time(ln_get_julian_from_sys());
-    if (LocationN[LOCATION_LATITUDE].value < 0)
+    if (LocationNP[LOCATION_LATITUDE].getValue() < 0)
         currentDEC = -90;
     else
         currentDEC = 90;
@@ -124,15 +124,15 @@ bool PMC8::initProperties()
                        ISR_1OFMANY, 0, IPS_IDLE);
 
     // relabel move speeds
-    strcpy(SlewRateSP.sp[0].label, "4x");
-    strcpy(SlewRateSP.sp[1].label, "8x");
-    strcpy(SlewRateSP.sp[2].label, "16x");
-    strcpy(SlewRateSP.sp[3].label, "32x");
-    strcpy(SlewRateSP.sp[4].label, "64x");
-    strcpy(SlewRateSP.sp[5].label, "128x");
-    strcpy(SlewRateSP.sp[6].label, "256x");
-    strcpy(SlewRateSP.sp[7].label, "512x");
-    strcpy(SlewRateSP.sp[8].label, "833x");
+    SlewRateSP[0].setLabel("4x");
+    SlewRateSP[1].setLabel("8x");
+    SlewRateSP[2].setLabel("16x");
+    SlewRateSP[3].setLabel("32x");
+    SlewRateSP[4].setLabel("64x");
+    SlewRateSP[5].setLabel("128x");
+    SlewRateSP[6].setLabel("256x");
+    SlewRateSP[7].setLabel("512x");
+    SlewRateSP[8].setLabel("833x");
 
     // settings for ramping up/down when moving
     IUFillNumber(&RampN[0], "RAMP_INTERVAL", "Interval (ms)", "%g", 20, 1000, 5, 200);
@@ -148,7 +148,7 @@ bool PMC8::initProperties()
     IUFillNumberVector(&LegacyGuideRateNP, LegacyGuideRateN, 1, getDeviceName(), "LEGACY_GUIDE_RATE", "Guide Rate", GUIDE_TAB,
                        IP_RW, 0, IPS_IDLE);
 
-    initGuiderProperties(getDeviceName(), GUIDE_TAB);
+    GI::initProperties(GUIDE_TAB);
 
     TrackState = SCOPE_IDLE;
 
@@ -190,21 +190,15 @@ bool PMC8::updateProperties()
             defineProperty(&LegacyGuideRateNP);
         }
 
-        defineProperty(&GuideNSNP);
-        defineProperty(&GuideWENP);
-
         defineProperty(&FirmwareTP);
 
         // do not support park position
-        deleteProperty(ParkPositionNP.name);
+        deleteProperty(ParkPositionNP);
         deleteProperty(ParkOptionSP);
     }
     else
     {
         deleteProperty(PostGotoSP.name);
-
-        deleteProperty(GuideNSNP.name);
-        deleteProperty(GuideWENP.name);
 
         if (firmwareInfo.IsRev2Compliant)
         {
@@ -219,6 +213,8 @@ bool PMC8::updateProperties()
 
         deleteProperty(RampNP.name);
     }
+
+    GI::updateProperties();
 
     return true;
 }
@@ -297,8 +293,8 @@ void PMC8::getStartupData()
 
     // PMC8 doesn't store location permanently so read from config and set
     // Convert to INDI standard longitude (0 to 360 Eastward)
-    double longitude = LocationN[LOCATION_LONGITUDE].value;
-    double latitude = LocationN[LOCATION_LATITUDE].value;
+    double longitude = LocationNP[LOCATION_LONGITUDE].getValue();
+    double latitude = LocationNP[LOCATION_LATITUDE].getValue();
     if (latitude < 0)
         currentDEC = -90;
     else
@@ -348,6 +344,10 @@ void PMC8::getStartupData()
 
 bool PMC8::ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n)
 {
+    // Check guider interface
+    if (GI::processNumber(dev, name, values, names, n))
+        return true;
+
     if (!strcmp(dev, getDeviceName()))
     {
         // Guiding Rate
@@ -386,18 +386,13 @@ bool PMC8::ISNewNumber(const char *dev, const char *name, double values[], char 
 
             return true;
         }
-        if (!strcmp(name, GuideNSNP.name) || !strcmp(name, GuideWENP.name))
-        {
-            processGuiderProperties(name, values, names, n);
-            return true;
-        }
         // Track Rate - auto change to custom track rate when setting
-        if (!strcmp(name, TrackRateNP.name))
+        if (TrackRateNP.isNameMatch(name))
         {
-            IUResetSwitch(&TrackModeSP);
-            TrackModeS[TRACK_CUSTOM].s = ISS_ON;
-            TrackModeSP.s = IPS_OK;
-            IDSetSwitch(&TrackModeSP, nullptr);
+            TrackModeSP.reset();
+            TrackModeSP[TRACK_CUSTOM].setState(ISS_ON);
+            TrackModeSP.setState(IPS_OK);
+            TrackModeSP.apply();
             return true;
         }
     }
@@ -502,7 +497,7 @@ bool PMC8::ReadScopeStatus()
                     {
                         LOG_INFO("Slew complete, tracking...");
                         TrackState = SCOPE_TRACKING;
-                        TrackStateSP.s = IPS_IDLE;
+                        TrackStateSP.setState(IPS_IDLE);
 
                         // Don't want to restart tracking after goto with v2 firmware, since mount does automatically
                         // and we might detect that slewing has stopped before it fully settles
@@ -565,15 +560,15 @@ bool PMC8::ReadScopeStatus()
 
                     if (rc && ((int)track_rate > 0) && ((int)track_rate <= PMC8_MAX_TRACK_RATE))
                     {
-                        IUResetSwitch(&TrackModeSP);
-                        TrackModeS[convertFromPMC8TrackMode(track_mode)].s = ISS_ON;
-                        TrackModeSP.s = IPS_OK;
-                        IDSetSwitch(&TrackModeSP, nullptr);
+                        TrackModeSP.reset();
+                        TrackModeSP[convertFromPMC8TrackMode(track_mode)].setState(ISS_ON);
+                        TrackModeSP.setState(IPS_OK);
+                        TrackModeSP.apply();
                         TrackState = SCOPE_TRACKING;
                         LOGF_INFO("Mount has started tracking at %f arcsec / sec", track_rate);
-                        TrackRateNP.s           = IPS_IDLE;
-                        TrackRateN[AXIS_RA].value = track_rate;
-                        IDSetNumber(&TrackRateNP, nullptr);
+                        TrackRateNP.setState(IPS_IDLE);
+                        TrackRateNP[AXIS_RA].setValue(track_rate);
+                        TrackRateNP.apply();
                     }
                 }
             }
@@ -601,18 +596,18 @@ bool PMC8::ReadScopeStatus()
                     }
                     else if (rc && ((int)track_rate <= PMC8_MAX_TRACK_RATE))
                     {
-                        if (TrackModeS[convertFromPMC8TrackMode(track_mode)].s != ISS_ON)
+                        if (TrackModeSP[convertFromPMC8TrackMode(track_mode)].getState() != ISS_ON)
                         {
-                            IUResetSwitch(&TrackModeSP);
-                            TrackModeS[convertFromPMC8TrackMode(track_mode)].s = ISS_ON;
-                            IDSetSwitch(&TrackModeSP, nullptr);
+                            TrackModeSP.reset();
+                            TrackModeSP[convertFromPMC8TrackMode(track_mode)].setState(ISS_ON);
+                            TrackModeSP.apply();
                         }
-                        if (TrackRateN[AXIS_RA].value != track_rate)
+                        if (TrackRateNP[AXIS_RA].getValue() != track_rate)
                         {
                             TrackState = SCOPE_TRACKING;
-                            TrackRateNP.s           = IPS_IDLE;
-                            TrackRateN[AXIS_RA].value = track_rate;
-                            IDSetNumber(&TrackRateNP, nullptr);
+                            TrackRateNP.setState(IPS_IDLE);
+                            TrackRateNP[AXIS_RA].setValue(track_rate);
+                            TrackRateNP.apply();
                             LOGF_INFO("Mount now tracking at %f arcsec / sec", track_rate);
                         }
                     }
@@ -702,7 +697,7 @@ bool PMC8::Sync(double ra, double dec)
         LOG_ERROR("Failed to sync.");
     }
 
-    EqNP.s     = IPS_OK;
+    EqNP.setState(IPS_OK);
 
     currentRA  = ra;
     currentDEC = dec;
@@ -721,11 +716,14 @@ void PMC8::AbortGotoTimeoutHelper(void *p)
 bool PMC8::Abort()
 {
     //GUIDE Abort guide operations.
-    if (GuideNSNP.s == IPS_BUSY || GuideWENP.s == IPS_BUSY)
+    if (GuideNSNP.getState() == IPS_BUSY || GuideWENP.getState() == IPS_BUSY)
     {
-        GuideNSNP.s = GuideWENP.s = IPS_IDLE;
-        GuideNSN[0].value = GuideNSN[1].value = 0.0;
-        GuideWEN[0].value = GuideWEN[1].value = 0.0;
+        GuideNSNP.setState(IPS_IDLE);
+        GuideWENP.setState(IPS_IDLE);
+        GuideNSNP[0].setValue(0);
+        GuideNSNP[1].setValue(0);
+        GuideWENP[0].setValue(0);
+        GuideWENP[1].setValue(0);
 
         if (GuideNSTID)
         {
@@ -740,8 +738,8 @@ bool PMC8::Abort()
         }
 
         LOG_INFO("Guide aborted.");
-        IDSetNumber(&GuideNSNP, nullptr);
-        IDSetNumber(&GuideWENP, nullptr);
+        GuideNSNP.apply();
+        GuideWENP.apply();
         return true;
     }
 
@@ -897,7 +895,7 @@ void PMC8::simulationTriggered(bool enable)
 
 int PMC8::getSlewRate()
 {
-    int mode = IUFindOnSwitchIndex(&SlewRateSP);
+    int mode = SlewRateSP.findOnSwitchIndex();
     if (mode >= 8) return PMC8_MAX_MOVE_RATE;
     return 4 * pow(2, mode) * 15;
 }
@@ -954,8 +952,8 @@ bool PMC8::ramp_movement(PMC8_DIRECTION dir)
     }
 
     //adjust for current tracking rate
-    if (dir == PMC8_E) adjrate += round(TrackRateN[AXIS_RA].value);
-    else if (dir == PMC8_W) adjrate -= round(TrackRateN[AXIS_RA].value);
+    if (dir == PMC8_E) adjrate += round(TrackRateNP[AXIS_RA].getValue());
+    else if (dir == PMC8_W) adjrate -= round(TrackRateNP[AXIS_RA].getValue());
 
     LOGF_EXTRA3("Ramping: mount dir %d, ramping dir %d, iteration %d, step to %d", dir, moveInfo->rampDir,
                 moveInfo->rampIteration, adjrate);
@@ -1019,7 +1017,7 @@ bool PMC8::MoveNS(INDI_DIR_NS dir, TelescopeMotionCommand command)
     }
 
     // read desired move rate
-    int currentIndex = IUFindOnSwitchIndex(&SlewRateSP);
+    int currentIndex = SlewRateSP.findOnSwitchIndex();
     LOGF_DEBUG("MoveNS at slew index %d", currentIndex);
 
     switch (command)
@@ -1090,7 +1088,7 @@ bool PMC8::MoveWE(INDI_DIR_WE dir, TelescopeMotionCommand command)
     }
 
     // read desired move rate
-    int currentIndex = IUFindOnSwitchIndex(&SlewRateSP);
+    int currentIndex = SlewRateSP.findOnSwitchIndex();
     LOGF_DEBUG("MoveWE at slew index %d", currentIndex);
 
     switch (command)
@@ -1152,9 +1150,9 @@ IPState PMC8::GuideNorth(uint32_t ms)
     {
 
         // If already moving, then stop movement
-        if (MovementNSSP.s == IPS_BUSY)
+        if (MovementNSSP.getState() == IPS_BUSY)
         {
-            int dir = IUFindOnSwitchIndex(&MovementNSSP);
+            int dir = MovementNSSP.findOnSwitchIndex();
             MoveNS(dir == 0 ? DIRECTION_NORTH : DIRECTION_SOUTH, MOTION_STOP);
         }
 
@@ -1193,9 +1191,9 @@ IPState PMC8::GuideSouth(uint32_t ms)
     {
 
         // If already moving, then stop movement
-        if (MovementNSSP.s == IPS_BUSY)
+        if (MovementNSSP.getState() == IPS_BUSY)
         {
-            int dir = IUFindOnSwitchIndex(&MovementNSSP);
+            int dir = MovementNSSP.findOnSwitchIndex();
             MoveNS(dir == 0 ? DIRECTION_NORTH : DIRECTION_SOUTH, MOTION_STOP);
         }
 
@@ -1234,9 +1232,9 @@ IPState PMC8::GuideEast(uint32_t ms)
     {
 
         // If already moving (no pulse command), then stop movement
-        if (MovementWESP.s == IPS_BUSY)
+        if (MovementWESP.getState() == IPS_BUSY)
         {
-            int dir = IUFindOnSwitchIndex(&MovementWESP);
+            int dir = MovementWESP.findOnSwitchIndex();
             MoveWE(dir == 0 ? DIRECTION_WEST : DIRECTION_EAST, MOTION_STOP);
         }
 
@@ -1248,7 +1246,7 @@ IPState PMC8::GuideEast(uint32_t ms)
 
         isPulsingWE = true;
 
-        start_pmc8_guide(PortFD, PMC8_E, (int)ms, timetaken_us, TrackRateN[AXIS_RA].value);
+        start_pmc8_guide(PortFD, PMC8_E, (int)ms, timetaken_us, TrackRateNP[AXIS_RA].getValue());
 
         timeremain_ms = (int)(ms - ((float)timetaken_us) / 1000.0);
 
@@ -1276,9 +1274,9 @@ IPState PMC8::GuideWest(uint32_t ms)
     {
 
         // If already moving (no pulse command), then stop movement
-        if (MovementWESP.s == IPS_BUSY)
+        if (MovementWESP.getState() == IPS_BUSY)
         {
-            int dir = IUFindOnSwitchIndex(&MovementWESP);
+            int dir = MovementWESP.findOnSwitchIndex();
             MoveWE(dir == 0 ? DIRECTION_WEST : DIRECTION_EAST, MOTION_STOP);
         }
 
@@ -1289,7 +1287,7 @@ IPState PMC8::GuideWest(uint32_t ms)
         }
 
         isPulsingWE = true;
-        start_pmc8_guide(PortFD, PMC8_W, (int)ms, timetaken_us, TrackRateN[AXIS_RA].value);
+        start_pmc8_guide(PortFD, PMC8_W, (int)ms, timetaken_us, TrackRateNP[AXIS_RA].getValue());
 
         timeremain_ms = (int)(ms - ((float)timetaken_us) / 1000.0);
 
@@ -1314,20 +1312,20 @@ void PMC8::guideTimeout(PMC8_DIRECTION calldir)
     if (calldir == PMC8_N || calldir == PMC8_S)
     {
         isPulsingNS = false;
-        GuideNSNP.np[0].value = 0;
-        GuideNSNP.np[1].value = 0;
-        GuideNSNP.s           = IPS_IDLE;
+        GuideNSNP[0].setValue(0);
+        GuideNSNP[1].setValue(0);
+        GuideNSNP.setState(IPS_IDLE);
         GuideNSTID            = 0;
-        IDSetNumber(&GuideNSNP, nullptr);
+        GuideNSNP.apply();
     }
     if (calldir == PMC8_W || calldir == PMC8_E)
     {
         isPulsingWE = false;
-        GuideWENP.np[0].value = 0;
-        GuideWENP.np[1].value = 0;
-        GuideWENP.s           = IPS_IDLE;
+        GuideWENP[0].setValue(0);
+        GuideWENP[1].setValue(0);
+        GuideWENP.setState(IPS_IDLE);
         GuideWETID            = 0;
-        IDSetNumber(&GuideWENP, nullptr);
+        GuideWENP.apply();
     }
 
     LOG_DEBUG("GUIDE CMD COMPLETED");
@@ -1396,15 +1394,15 @@ void PMC8::mountSim()
     switch (TrackState)
     {
         case SCOPE_IDLE:
-            currentRA += (TrackRateN[AXIS_RA].value / 3600.0 * dt) / 15.0;
+            currentRA += (TrackRateNP[AXIS_RA].getValue() / 3600.0 * dt) / 15.0;
             currentRA = range24(currentRA);
             break;
 
         case SCOPE_TRACKING:
-            if (TrackModeS[1].s == ISS_ON)
+            if (TrackModeSP[1].getState() == ISS_ON)
             {
-                currentRA  += ( ((TRACKRATE_SIDEREAL / 3600.0) - (TrackRateN[AXIS_RA].value / 3600.0)) * dt) / 15.0;
-                currentDEC += ( (TrackRateN[AXIS_DE].value / 3600.0) * dt);
+                currentRA  += ( ((TRACKRATE_SIDEREAL / 3600.0) - (TrackRateNP[AXIS_RA].getValue() / 3600.0)) * dt) / 15.0;
+                currentDEC += ( (TrackRateNP[AXIS_DE].getValue() / 3600.0) * dt);
             }
             break;
 
@@ -1561,7 +1559,7 @@ bool PMC8::SetTrackMode(uint8_t mode)
 
     if (pmc8_mode == PMC8_TRACK_CUSTOM)
     {
-        if (set_pmc8_ra_tracking(PortFD, TrackRateN[AXIS_RA].value))
+        if (set_pmc8_ra_tracking(PortFD, TrackRateNP[AXIS_RA].getValue()))
         {
             return true;
         }
@@ -1607,7 +1605,7 @@ bool PMC8::SetTrackEnabled(bool enabled)
     // need to determine current tracking mode and start tracking
     if (enabled)
     {
-        if (!SetTrackMode(IUFindOnSwitchIndex(&TrackModeSP)))
+        if (!SetTrackMode(TrackModeSP.findOnSwitchIndex()))
         {
             LOG_ERROR("PMC8::SetTrackEnabled - unable to enable tracking");
             return false;
